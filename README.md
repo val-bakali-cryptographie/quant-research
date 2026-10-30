@@ -1,155 +1,118 @@
-# RISQUE DE RUINE & RETRAITE — Guide d'installation et d'utilisation
-## Moteur Monte Carlo VBA + Calibration Python
+# Quantitative Research — Multi-Strategy Backtesting Framework
+
+> **Framework public · Signaux propriétaires non inclus**  
+> Moteur, métriques et validation sont publiés. Les signaux d'entrée restent privés.  
+> *"The microscope is public. The sample stays private."*
 
 ---
 
-## ARCHITECTURE DU PROJET
+## Stratégies
+
+### 1. SPY/BIL — Trend Following H1 · `h1_spy_bil/`
+Signal de tendance sur SPY (1993–2026) avec switch dynamique vers BIL (cash) en bear market.
+
+| Période | CAGR | MaxDD | Calmar | Sharpe |
+|---------|------|-------|--------|--------|
+| IS 1993–2017 | +11.2% | −16.4% | 0.68 | 0.82 |
+| OOS 2018–2026 | +9.8% | −22.5% | **0.44** | 0.71 |
+| B&H SPY (ref.) | +10.6% | −56.4% | 0.19 | 0.58 |
+
+- Signal : régression linéaire sur log-prix (fenêtre 252j) — zéro look-ahead
+- 8 trades en 33 ans — robustesse par construction
+- Testé sur 4 crises majeures : Dot-com 2000, GFC 2008, COVID 2020, Bear 2022
+- Bootstrap 5 000 itérations · Walk-forward par décennie
+
+---
+
+### 2. XAU/USD 4h — Enveloppes σ-Dynamiques Géométriques · `xau_envelopes/`
+Mean reversion sur XAUUSD 4h avec 4 niveaux d'enveloppe calibrés sur la volatilité réalisée et pondération géométrique [6.7%, 13.3%, 26.7%, 53.3%].
+
+| Période | CAGR | MaxDD | Calmar | WR | N |
+|---------|------|-------|--------|----|---|
+| IS 2003–2014 | +6.5% | −5.5% | **1.19** | 83% | 3 354 |
+| OOS 2015–2026 | +4.2% | −6.1% | **0.78** | 83% | 3 758 |
+
+- Walk-forward **16/16** fenêtres OOS positives sur 23 ans
+- Positif sur **tous les régimes** (bull 2003–11, bear 2012–15, range, COVID, hausse 2023–26)
+- Poids géométriques : entrée progressive, exposition max sur rebond profond
+
+---
+
+### 3. HYPE/USDT 1h — Enveloppes Géométriques · `hype_geo/`
+Mean reversion sur actif crypto haute volatilité. Mêmes principes moteur que XAU.
+
+| Période | Calmar | MaxDD | WR | N |
+|---------|--------|-------|----|---|
+| IS déc 2024–sept 2025 | **68** | −5% | 90% | 3 673 |
+| OOS oct 2025–août 2026 | **57** | −2% | 90% | 3 641 |
+
+*Signal propriétaire masqué — résultats obtenus en local avec le vrai signal.*
+
+---
+
+### 4. XAU/USD 1h — Asian Range Mean Reversion · `xau_asian_range/`
+Exploitation du range de la session asiatique (17h–22h UTC). Entrée limit −0.3% sous le Low, TP au High du range, SL 1.5%.
+
+| Période | CAGR | MaxDD | Calmar | WR | N |
+|---------|------|-------|--------|----|---|
+| Discovery 2003–2014 | +87.8% | −3.2% | **27.7** | 80.6% | 1 177 |
+| Validation 2015–2020 | +51.0% | — | **23.8** | — | 497 |
+| Forward OOS 2021–2026 | +87.3% | — | **54.6** | 85% | 592 |
+| Walk-forward | — | — | — | **8/8** OOS+ | — |
+
+*Signal propriétaire masqué — résultats obtenus en local avec le vrai signal.*
+
+---
+
+## Architecture
 
 ```
-projet_risque_ruine/
-│
-├── calibration_europeenne.py      ← Script Python (ÉTAPE 1)
-├── params_calibres.xlsx           ← Généré par Python, lu par VBA
-│
-└── RisqueDeRuine.xlsm             ← Classeur Excel + VBA (ÉTAPE 2+)
-    │
-    ├── Module1_Constantes.bas     → Constantes globales et types
-    ├── Module2_ChargementParams.bas → Lecture de params_calibres.xlsx
-    ├── Module3_Aleatoire.bas      → LCG + Box-Muller + Bootstrap
-    ├── Module4_MonteCarlo.bas     → Moteur de simulation (3 modèles)
-    ├── Module5_CarteDeChалeur.bas → Heatmap probabilité ruine × taux × alloc
-    ├── Module6_SequenceRisk.bas   → Analyse sequence of returns risk
-    └── Module7_Dashboard.bas      → Interface utilisateur + boutons
+quant-research/
+├── h1_spy_bil/
+│   ├── backtest.py        # moteur complet, signal linreg public
+│   └── results/           # graphiques institutionnels
+├── xau_envelopes/
+│   ├── backtest.py        # moteur V2 σ-dynamiques
+│   └── results/           # equity, drawdown, walk-forward, régimes
+├── hype_geo/
+│   ├── backtest.py        # moteur public, signal masqué
+│   └── results/
+├── xau_asian_range/
+│   ├── backtest.py        # moteur public, signal masqué
+│   └── results/
+└── signals/               # ← non commité (.gitignore)
+    └── *.py               # signaux propriétaires locaux uniquement
 ```
 
 ---
 
-## ÉTAPE 1 — CALIBRATION PYTHON (obligatoire, une seule fois)
+## Principes méthodologiques
 
-### Installation des dépendances
-```bash
-pip install pandas numpy scipy yfinance openpyxl
-```
+**Zéro look-ahead** — `signal[i]` appliqué à `open[i+1]` systématiquement via `pos.shift(1)`
 
-### Lancement
-```bash
-python calibration_europeenne.py
-```
+**Modèle de frais** — 5 bps/côté (H1 SPY) · 10 bps/côté (enveloppes, Asian Range)
 
-### Ce que ça produit
-Le fichier `params_calibres.xlsx` avec 3 feuilles :
-- `GBM_Params` : μ et σ actions/obligations calibrés sur données européennes post-2022
-- `Regimes_Params` : paramètres chaîne de Markov (expansion/récession)
-- `Bootstrap_Data` : table des rendements annuels réels historiques
+**Validation IS/OOS stricte** — split temporel unique, jamais de refit sur OOS
 
-> **Sources** : iShares MSCI Europe ETF (EXW1.DE) + iShares € Corp Bond (IBCE.AS)
-> Inflation : 5,5 % moyenne zone euro 2022-2024 (Eurostat)
+**Walk-forward** — fenêtres glissantes indépendantes, résultats agrégés
+
+**Bootstrap** — 5 000 permutations de retours journaliers (H1), IC90% sur Calmar
+
+**Calmar comme métrique primaire** — CAGR% / |MaxDD%| — pénalise explicitement le risque réalisé
 
 ---
 
-## ÉTAPE 2 — INSTALLATION VBA
+## Stack technique
 
-### Créer le classeur
-1. Ouvrir Excel → Nouveau classeur vide
-2. Sauvegarder en `.xlsm` (classeur avec macros) dans le **même dossier** que `params_calibres.xlsx`
-3. Ouvrir l'éditeur VBA (`Alt + F11`)
-
-### Importer les modules
-Pour chaque fichier `.bas` :
-- `Fichier` → `Importer un fichier`
-- Sélectionner les 7 modules dans l'ordre
-
-### Première initialisation
-Dans la fenêtre Exécution VBA (`Ctrl + G`) :
-```vba
-Call CreerDashboard
-```
-Cela crée la feuille Dashboard avec tous les boutons et plages nommées.
+Python 3.11 · pandas · numpy · matplotlib · pyarrow  
+Données : Yahoo Finance (SPY/BIL) · flux propriétaire (XAU/HYPE)
 
 ---
 
-## ÉTAPE 3 — UTILISATION QUOTIDIENNE
+## Auteur
 
-### Workflow normal
-1. Ouvrir `RisqueDeRuine.xlsm`
-2. Les paramètres se chargent automatiquement (`Workbook_Open`)
-3. Saisir les paramètres dans le Dashboard (cellules jaunes)
-4. Cliquer **▶ Lancer Simulation** → résultats en ~15-30 secondes
-5. Cliquer **⬛ Carte de Chaleur** → ~2-5 minutes
-6. Cliquer **〜 Sequence of Returns** → analyse immédiate
+**Valentin Bakali** — Étudiant ingénieur 5ème année, ESME Sudria Paris  
+Spécialisation Data Science & IA / Ingénierie financière  
+Trader algorithmique autodidacte depuis l'âge de 17 ans
 
-### Paramètres saisissables
-| Paramètre | Valeur par défaut | Description |
-|-----------|-------------------|-------------|
-| Capital initial | 500 000 € | Épargne au moment du départ en retraite |
-| Taux de retrait | 4,0 % | Fraction du capital retiré chaque année |
-| Allocation actions | 60 % | Part du portefeuille en actions |
-| Horizon | 30 ans | Durée de retraite simulée |
-| Modèle | 1 (GBM) | 1=GBM, 2=Bootstrap, 3=Régimes |
-| Retrait indexé | Vrai | Si Vrai : retrait augmente avec l'inflation |
-
----
-
-## LES 3 MODÈLES DE RENDEMENT
-
-### 1. GBM Classique (Modèle = 1)
-- Rendements log-normaux avec μ et σ calibrés sur données européennes post-2022
-- Actions et obligations corrélés via décomposition de Cholesky
-- **Usage** : scénario de base, point de comparaison
-
-### 2. Bootstrap Historique (Modèle = 2)
-- Rééchantillonnage par blocs de 3-5 ans des vraies données de marché
-- Conserve les queues de distribution et les crises passées (2000, 2008)
-- **Usage** : scénarios réalistes incluant les événements extrêmes
-
-### 3. Modèle à Régimes (Modèle = 3)
-- Chaîne de Markov 2 états : Expansion (μ_exp, σ_exp) et Récession (μ_rec, σ_rec)
-- Probabilités de transition calibrées par algorithme EM (Baum-Welch)
-- **Usage** : le plus réaliste — capture la persistance des crises
-
----
-
-## FEUILLES GÉNÉRÉES
-
-| Feuille | Contenu |
-|---------|---------|
-| `Dashboard` | Interface principale, inputs, résultats |
-| `Resultats` | 10 000 lignes : ruine, capital final, drawdown par trajectoire |
-| `Trajectoires` | 50 trajectoires complètes année par année (pour graphiques) |
-| `CarteDeChалeur` | Grille probabilité de ruine 13×9 avec colorisation |
-| `SequenceRisk` | Analyse comparée des scénarios de départ (2000, 2007, 2010, 2023) |
-
----
-
-## PERFORMANCE
-
-| Calcul | Temps approximatif |
-|--------|-------------------|
-| Charger paramètres | < 1 seconde |
-| Simulation 10 000 trajectoires (GBM) | 15-25 secondes |
-| Simulation 10 000 trajectoires (Bootstrap) | 20-35 secondes |
-| Simulation 10 000 trajectoires (Régimes) | 25-40 secondes |
-| Carte de chaleur (2 000 traj × 117 cellules) | 2-5 minutes |
-| Analyse Sequence Risk | < 30 secondes |
-
----
-
-## REPRODUCTIBILITÉ
-
-- `SEED_ALEATOIRE = 42` dans Module1 → résultats identiques à chaque run
-- Mettre `SEED_ALEATOIRE = 0` pour des résultats aléatoires à chaque fois
-
----
-
-## INTERPRÉTATION DES RÉSULTATS
-
-### Probabilité de ruine
-- **< 5 %** : Acceptable. Correspond à une stratégie conservatrice
-- **5-10 %** : Zone de vigilance. Revoir l'allocation ou baisser le taux de retrait
-- **> 10 %** : Risque élevé. La règle des 4 % américaine ne s'applique pas au contexte européen à taux bas
-
-### Règle des 4 % en Europe
-La règle de Bengen (1994, étude Trinity) a été calibrée sur données **américaines**.
-En Europe, les paramètres Dimson-Marsh-Staunton (Credit Suisse Yearbook) donnent
-des rendements réels actions plus faibles (~4-5 % vs ~7 % US) et une inflation
-post-2022 plus élevée. Le taux de retrait "sûr" en Europe est estimé à **3-3,5 %**.
+[github.com/valentinbakali](https://github.com/valentinbakali)
